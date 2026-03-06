@@ -1,21 +1,42 @@
-"""In-memory storage backend for tasks."""
+"""JSON file-based persistent storage backend."""
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from typing import Optional
 
 from task_manager.models import Task, TaskStatus
 from task_manager.base_store import BaseTaskStore
 
 
-class MemoryStore(BaseTaskStore):
-    """In-memory task storage (non-persistent)."""
+class JsonStore(BaseTaskStore):
+    """Persistent storage using a local JSON file."""
 
-    def __init__(self) -> None:
+    def __init__(self, file_path: str = "tasks.json") -> None:
+        self._path = Path(file_path)
         self._tasks: dict[str, Task] = {}
+        self._load()
+
+    def _load(self) -> None:
+        """Load tasks from JSON file."""
+        if self._path.exists():
+            with open(self._path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            self._tasks = {
+                item["task_id"]: Task.from_dict(item)
+                for item in data
+            }
+
+    def _save(self) -> None:
+        """Persist tasks to JSON file."""
+        data = [t.to_dict() for t in self._tasks.values()]
+        with open(self._path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
 
     def add(self, task: Task) -> str:
         self._tasks[task.task_id] = task
+        self._save()
         return task.task_id
 
     def get(self, task_id: str) -> Optional[Task]:
@@ -24,10 +45,12 @@ class MemoryStore(BaseTaskStore):
     def update(self, task: Task) -> None:
         if task.task_id in self._tasks:
             self._tasks[task.task_id] = task
+            self._save()
 
     def remove(self, task_id: str) -> bool:
         if task_id in self._tasks:
             del self._tasks[task_id]
+            self._save()
             return True
         return False
 
