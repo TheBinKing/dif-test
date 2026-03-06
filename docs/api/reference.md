@@ -1,6 +1,6 @@
 # API 参考
 
-本文档提供 TaskManager 系统所有公共 API 的详细参考。
+本文档提供 TaskManager v0.3.0 系统所有公共 API 的详细参考。
 
 ## 数据模型 API
 
@@ -71,7 +71,7 @@ class Task:
     status: TaskStatus = TaskStatus.TODO
     priority: Priority = Priority.MEDIUM
     assignee: Optional[str] = None
-    tags: list[str] = field(default_factory=list)
+    tags: list[str] = field(default_factory=list)  # 新增：标签支持
     subtasks: list[SubTask] = field(default_factory=list)
     due_date: Optional[datetime] = None
     created_at: datetime = field(default_factory=datetime.now)
@@ -85,409 +85,640 @@ class Task:
 task = Task(
     title="完成项目文档",
     description="撰写用户手册和API文档",
-    priority=Priority.HIGH
+    priority=Priority.HIGH,
+    tags=["documentation", "important"]
 )
 ```
 
-**方法：**
+所有原有方法保持不变，Task 类新增标签支持但其他 API 接口未变更。
 
-#### `mark_done() -> None`
-标记任务为已完成，更新状态和时间戳。
+## 事件系统 API
+
+### EventType (枚举)
+
+系统事件类型枚举。
 
 ```python
-task.mark_done()
-print(task.status)  # TaskStatus.DONE
+from task_manager.events import EventType
+
+class EventType(Enum):
+    TASK_CREATED = "task_created"
+    TASK_UPDATED = "task_updated"
+    TASK_COMPLETED = "task_completed"
+    TASK_CANCELLED = "task_cancelled"
+    TASK_DELETED = "task_deleted"
+    TASK_ASSIGNED = "task_assigned"
+    TASK_OVERDUE = "task_overdue"
+    SUBTASK_ADDED = "subtask_added"
+    SUBTASK_COMPLETED = "subtask_completed"
+    BATCH_IMPORT = "batch_import"
+    BATCH_EXPORT = "batch_export"
 ```
 
-#### `cancel() -> None`
-取消任务，设置状态为 CANCELLED。
+### Event (数据类)
+
+事件数据载体。
 
 ```python
-task.cancel()
-print(task.status)  # TaskStatus.CANCELLED
-```
+from task_manager.events import Event, EventType
 
-#### `start() -> None`
-开始任务，设置状态为 IN_PROGRESS。
-
-```python
-task.start()
-print(task.status)  # TaskStatus.IN_PROGRESS
-```
-
-#### `assign_to(user: str) -> None`
-将任务分配给指定用户。
-
-**参数：**
-- `user` (str): 负责人姓名
-
-```python
-task.assign_to("张三")
-print(task.assignee)  # "张三"
-```
-
-#### `add_subtask(title: str) -> SubTask`
-添加子任务并返回子任务对象。
-
-**参数：**
-- `title` (str): 子任务标题
-
-**返回值：** 创建的 SubTask 对象
-
-```python
-subtask = task.add_subtask("设计数据库表结构")
-print(len(task.subtasks))  # 1
-```
-
-#### `to_dict() -> dict`
-将任务序列化为字典格式。
-
-**返回值：** 包含任务所有数据的字典
-
-```python
-data = task.to_dict()
-print(data["title"])  # 任务标题
-```
-
-#### `from_dict(data: dict) -> Task` (类方法)
-从字典反序列化创建任务对象。
-
-**参数：**
-- `data` (dict): 任务数据字典
-
-**返回值：** Task 实例
-
-```python
-task = Task.from_dict({
-    "task_id": "abc123",
-    "title": "测试任务",
-    "status": "todo",
-    "priority": 2,
-    "created_at": "2026-03-06T14:32:54",
-    "updated_at": "2026-03-06T14:32:54"
-})
+@dataclass
+class Event:
+    event_type: EventType
+    timestamp: datetime = field(default_factory=datetime.now)
+    task_id: Optional[str] = None
+    payload: dict[str, Any] = field(default_factory=dict)
 ```
 
 **属性：**
 
-#### `progress -> float`
-基于子任务的完成进度（0.0 到 1.0）。
+#### `key -> str`
+返回事件的短字符串标识符。
 
 ```python
-print(task.progress)  # 0.5 (50% 完成)
+event = Event(EventType.TASK_COMPLETED, task_id="abc123")
+print(event.key)  # "task_completed:abc123"
 ```
 
-#### `is_overdue -> bool`
-检查任务是否已过期。
+### EventBus (核心类)
+
+事件总线，负责事件分发和管理。
 
 ```python
-if task.is_overdue:
-    print("任务已逾期！")
+from task_manager.events import EventBus, get_event_bus
+
+# 获取全局单例
+bus = get_event_bus()
+
+# 或创建新实例
+bus = EventBus()
 ```
 
-## 存储 API
+**方法：**
 
-### BaseTaskStore (抽象基类)
+#### `subscribe(event_type: Optional[EventType], handler: EventHandler) -> None`
+订阅事件处理器。
 
-存储后端的抽象接口。
+**参数：**
+- `event_type`: 要监听的事件类型，传入 `None` 监听所有事件
+- `handler`: 事件处理函数，签名为 `(Event) -> None`
 
 ```python
-from task_manager.base_store import BaseTaskStore
+def on_task_done(event: Event):
+    print(f"Task {event.task_id} completed!")
+
+bus.subscribe(EventType.TASK_COMPLETED, on_task_done)
+
+# 监听所有事件
+def log_all(event: Event):
+    print(f"Event: {event.key}")
+
+bus.subscribe(None, log_all)
 ```
 
-**抽象方法：**
+#### `unsubscribe(event_type: Optional[EventType], handler: EventHandler) -> None`
+取消订阅事件处理器。
 
-#### `add(task: Task) -> str`
-添加任务到存储。
-
-**参数：** Task 对象
-**返回值：** 任务ID字符串
-
-#### `get(task_id: str) -> Optional[Task]`
-根据ID获取任务。
-
-**参数：** 任务ID
-**返回值：** Task对象或None
-
-#### `update(task: Task) -> None`
-更新已存在的任务。
-
-**参数：** 更新后的Task对象
-
-#### `remove(task_id: str) -> bool`
-删除任务。
-
-**参数：** 任务ID
-**返回值：** 删除成功返回True，不存在返回False
-
-#### `list_all() -> list[Task]`
-获取所有任务，按优先级降序排列。
-
-**返回值：** Task对象列表
-
-#### `filter_by_status(status: TaskStatus) -> list[Task]`
-根据状态筛选任务。
-
-**参数：** TaskStatus 枚举值
-**返回值：** 匹配的Task对象列表
-
-#### `filter_by_assignee(assignee: str) -> list[Task]`
-根据负责人筛选任务。
-
-**参数：** 负责人姓名
-**返回值：** 分配给该用户的Task对象列表
-
-#### `search(keyword: str) -> list[Task]`
-根据关键词搜索任务。
-
-**参数：** 搜索关键词
-**返回值：** 匹配的Task对象列表
-
-#### `count -> int` (属性)
-任务总数。
-
-### MemoryStore
-
-基于内存的存储实现。
+#### `emit(event: Event) -> None`
+发出事件，触发所有匹配的处理器。
 
 ```python
-from task_manager.storage import MemoryStore
-
-store = MemoryStore()
+bus.emit(Event(
+    EventType.TASK_COMPLETED,
+    task_id="abc123",
+    payload={"title": "完成文档"}
+))
 ```
 
-**特点：**
-- 数据存储在内存中
-- 进程结束后数据丢失
-- 查询性能优秀
-- 适用于测试
+#### `get_history(event_type: Optional[EventType] = None, limit: int = 50) -> list[Event]`
+获取事件历史记录。
 
-**使用示例：**
+**参数：**
+- `event_type`: 事件类型过滤器，`None` 返回所有类型
+- `limit`: 最大返回数量
 
 ```python
-store = MemoryStore()
-task = Task("测试任务")
-task_id = store.add(task)
-retrieved = store.get(task_id)
-print(retrieved.title)  # "测试任务"
+# 获取最近20个完成事件
+recent_completions = bus.get_history(EventType.TASK_COMPLETED, 20)
+
+# 获取最近50个事件
+recent_events = bus.get_history(limit=50)
 ```
 
-### JsonStore
+#### `clear_history() -> None`
+清空事件历史记录。
 
-基于JSON文件的持久化存储。
+#### `handler_count -> int` (属性)
+返回已注册的处理器总数。
+
+### 工具函数
+
+#### `get_event_bus() -> EventBus`
+获取全局事件总线单例。
+
+#### `reset_event_bus() -> None`
+重置全局事件总线（主要用于测试）。
+
+## 模板系统 API
+
+### TaskTemplate (数据类)
+
+任务模板数据模型。
 
 ```python
-from task_manager.json_store import JsonStore
+from task_manager.templates import TaskTemplate
+from task_manager.models import Priority
+
+@dataclass
+class TaskTemplate:
+    name: str
+    title_pattern: str
+    description_pattern: str = ""
+    default_priority: Priority = Priority.MEDIUM
+    default_tags: list[str] = field(default_factory=list)
+    subtask_titles: list[str] = field(default_factory=list)
+    variables: dict[str, str] = field(default_factory=dict)
+```
+
+**方法：**
+
+#### `render(overrides: Optional[dict[str, str]] = None) -> Task`
+从模板生成任务实例。
+
+**参数：**
+- `overrides`: 变量值覆盖字典
+
+**返回值：** 生成的 Task 对象
+
+```python
+template = TaskTemplate(
+    name="bug-fix",
+    title_pattern="Fix: {summary}",
+    description_pattern="Bug report: {details}",
+    subtask_titles=["Reproduce issue", "Fix code", "Test"],
+    variables={"summary": "", "details": ""}
+)
+
+task = template.render({
+    "summary": "Login fails",
+    "details": "Users cannot sign in"
+})
+print(task.title)  # "Fix: Login fails"
+```
+
+#### `to_dict() -> dict[str, Any]`
+序列化模板为字典。
+
+#### `from_dict(data: dict[str, Any]) -> TaskTemplate` (类方法)
+从字典反序列化模板。
+
+### TemplateRegistry (管理类)
+
+模板注册表，管理模板的存储和加载。
+
+```python
+from task_manager.templates import TemplateRegistry
 
 # 使用默认文件路径
-store = JsonStore()
+registry = TemplateRegistry()
 
 # 使用自定义文件路径
-store = JsonStore("/path/to/my/tasks.json")
+registry = TemplateRegistry("my_templates.json")
 ```
 
 **构造函数：**
 
-#### `JsonStore(file_path: str = "tasks.json")`
+#### `TemplateRegistry(file_path: Optional[str] = None)`
 
 **参数：**
-- `file_path` (str): JSON文件路径，默认为 "tasks.json"
+- `file_path`: JSON文件路径，`None` 表示仅内存存储
 
-**特点：**
-- 数据持久化到JSON文件
-- 自动处理文件加载和保存
-- UTF-8编码支持中文
-- 每次修改都会保存
+**方法：**
 
-## 统计 API
-
-### summary(store: BaseTaskStore) -> dict
-
-生成任务统计摘要。
+#### `add(template: TaskTemplate) -> None`
+添加或更新模板。
 
 ```python
-from task_manager.stats import summary
-
-stats = summary(store)
+registry.add(TaskTemplate(
+    name="meeting",
+    title_pattern="{type} meeting: {topic}",
+    default_tags=["meeting"]
+))
 ```
+
+#### `get(name: str) -> Optional[TaskTemplate]`
+根据名称获取模板。
+
+#### `remove(name: str) -> bool`
+删除模板，成功返回 `True`。
+
+#### `list_all() -> list[TaskTemplate]`
+获取所有已注册模板。
+
+#### `builtin_templates() -> list[TaskTemplate]` (静态方法)
+获取内置模板列表。
+
+```python
+builtins = TemplateRegistry.builtin_templates()
+for template in builtins:
+    print(f"{template.name}: {template.title_pattern}")
+```
+
+**内置模板：**
+- `bug-fix` - Bug修复工作流
+- `feature` - 功能开发模板
+- `release` - 版本发布检查清单
+
+## 批量操作 API
+
+### BatchOperations (操作类)
+
+批量任务操作的高级接口。
+
+```python
+from task_manager.batch import BatchOperations
+
+batch = BatchOperations(store)
+```
+
+**构造函数：**
+
+#### `BatchOperations(store: BaseTaskStore)`
 
 **参数：**
-- `store`: BaseTaskStore 实例
+- `store`: 任务存储实例
 
-**返回值：** 包含统计信息的字典
+**方法：**
 
-```python
-{
-    "total": 10,
-    "by_status": {
-        "todo": 3,
-        "in_progress": 2,
-        "done": 4,
-        "cancelled": 1
-    },
-    "by_priority": {
-        "LOW": 2,
-        "MEDIUM": 5,
-        "HIGH": 2,
-        "CRITICAL": 1
-    },
-    "overdue_count": 1,
-    "completion_rate": 0.4
-}
-```
-
-### format_summary(stats: dict) -> str
-
-将统计数据格式化为可读字符串。
-
-```python
-from task_manager.stats import format_summary
-
-formatted = format_summary(stats)
-print(formatted)
-```
+#### `import_from_json(file_path: str) -> list[Task]`
+从JSON文件导入任务。
 
 **参数：**
-- `stats`: summary() 返回的统计字典
+- `file_path`: JSON文件路径
 
-**返回值：** 格式化的统计报表字符串
+**返回值：** 成功导入的任务列表
+
+```python
+imported = batch.import_from_json("backup.json")
+print(f"Imported {len(imported)} tasks")
+```
+
+#### `export_to_json(file_path: str, status_filter: Optional[TaskStatus] = None) -> int`
+导出任务到JSON文件。
+
+**参数：**
+- `file_path`: 输出文件路径
+- `status_filter`: 状态过滤器，`None` 导出所有任务
+
+**返回值：** 导出的任务数量
+
+```python
+# 导出所有任务
+count = batch.export_to_json("all_tasks.json")
+
+# 仅导出已完成任务
+count = batch.export_to_json("done_tasks.json", TaskStatus.DONE)
+```
+
+#### `complete_all(task_ids: Optional[list[str]] = None) -> int`
+批量完成任务。
+
+**参数：**
+- `task_ids`: 任务ID列表，`None` 表示完成所有未完成任务
+
+**返回值：** 实际完成的任务数量
+
+```python
+# 完成指定任务
+count = batch.complete_all(["abc123", "def456"])
+
+# 完成所有待办任务
+count = batch.complete_all()
+```
+
+#### `cancel_all(task_ids: Optional[list[str]] = None) -> int`
+批量取消任务。
+
+#### `reassign_all(task_ids: list[str], new_assignee: str) -> int`
+批量重新分配任务。
+
+**参数：**
+- `task_ids`: 任务ID列表
+- `new_assignee`: 新的负责人
+
+**返回值：** 重新分配的任务数量
+
+```python
+count = batch.reassign_all(["abc123", "def456"], "张三")
+print(f"Re-assigned {count} tasks to 张三")
+```
+
+#### `find_duplicates(threshold: float = 0.8) -> list[tuple[Task, Task]]`
+查找重复任务。
+
+**参数：**
+- `threshold`: 相似度阈值（0.0-1.0）
+
+**返回值：** 疑似重复任务对列表
+
+```python
+duplicates = batch.find_duplicates(threshold=0.9)
+for task_a, task_b in duplicates:
+    print(f"Similar: {task_a.title} vs {task_b.title}")
+```
+
+## 插件系统 API
+
+### PluginMeta (数据类)
+
+插件元数据。
+
+```python
+from task_manager.plugins import PluginMeta
+
+@dataclass
+class PluginMeta:
+    name: str
+    version: str
+    description: str
+    author: str = ""
+```
+
+### BasePlugin (抽象基类)
+
+所有插件的基类。
+
+```python
+from task_manager.plugins import BasePlugin
+from task_manager.events import EventBus
+
+class MyPlugin(BasePlugin):
+    def __init__(self, event_bus: EventBus, config: dict):
+        super().__init__(event_bus, config)
+    
+    @property
+    def meta(self) -> PluginMeta:
+        return PluginMeta(
+            name="my-plugin",
+            version="1.0.0",
+            description="My custom plugin"
+        )
+    
+    def activate(self):
+        self.bus.subscribe(EventType.TASK_COMPLETED, self._on_complete)
+    
+    def _on_complete(self, event):
+        print(f"Task completed: {event.task_id}")
+```
+
+**构造函数：**
+
+#### `BasePlugin(event_bus: Optional[EventBus] = None, config: Optional[dict[str, Any]] = None)`
+
+**参数：**
+- `event_bus`: 事件总线实例，默认使用全局单例
+- `config`: 插件配置字典
+
+**抽象方法：**
+
+#### `meta -> PluginMeta` (属性)
+返回插件元数据。
+
+#### `activate() -> None`
+激活插件，注册事件处理器。
+
+**可选方法：**
+
+#### `deactivate() -> None`
+停用插件，清理资源。默认为空实现。
+
+### PluginRegistry (管理类)
+
+插件注册表，管理插件生命周期。
+
+```python
+from task_manager.plugins import PluginRegistry
+
+registry = PluginRegistry()
+```
+
+**方法：**
+
+#### `register(plugin_cls: type[BasePlugin], config: Optional[dict[str, Any]] = None) -> BasePlugin`
+注册并激活插件。
+
+**参数：**
+- `plugin_cls`: 插件类
+- `config`: 插件配置
+
+**返回值：** 插件实例
+
+```python
+class NotifyPlugin(BasePlugin):
+    # ... 插件实现
+
+plugin = registry.register(NotifyPlugin, {
+    "log_file": "/tmp/notifications.log"
+})
+```
+
+#### `unregister(name: str) -> None`
+注销插件。
+
+#### `get(name: str) -> Optional[BasePlugin]`
+根据名称获取插件实例。
+
+#### `loaded -> list[str]` (属性)
+返回所有已加载插件的名称列表。
+
+#### `shutdown() -> None`
+关闭所有插件。
+
+## 内置插件 API
+
+### NotificationPlugin
+
+任务事件通知插件。
+
+```python
+from task_manager.plugins.notification import NotificationPlugin
+
+plugin = NotificationPlugin(config={
+    "log_file": "notifications.log",
+    "notify_events": ["task_completed", "task_overdue"]
+})
+```
+
+**配置选项：**
+- `log_file` (str): 日志文件路径，可选
+- `notify_events` (list[str]): 要通知的事件类型列表
+
+### ExportPlugin
+
+任务导出插件。
+
+```python
+from task_manager.plugins.export import ExportPlugin
+
+plugin = ExportPlugin()
+csv_content = plugin.export_tasks(tasks, fmt="csv")
+```
+
+**方法：**
+
+#### `export_tasks(tasks: list[Task], fmt: str = "json", output_path: Optional[str] = None) -> str`
+导出任务到指定格式。
+
+**参数：**
+- `tasks`: 要导出的任务列表
+- `fmt`: 输出格式（json/csv/markdown）
+- `output_path`: 输出文件路径，`None` 返回字符串
+
+**返回值：** 格式化的内容字符串
 
 ## CLI API
 
-### main()
+命令行界面保持原有的所有命令，新增以下命令组：
 
-命令行程序的主入口点。
-
-```python
-from task_manager.cli import main
-
-if __name__ == "__main__":
-    main()
-```
-
-### 支持的命令
-
-#### add - 添加任务
+### 模板命令
 
 ```bash
-python -m task_manager.cli add "任务标题" [选项]
+# 列出模板
+python -m task_manager.cli template list
+
+# 使用模板
+python -m task_manager.cli template use <name> [-v key=value] [-a assignee]
 ```
 
-**选项：**
-- `-d, --description`: 任务描述
-- `-p, --priority`: 优先级 (low/medium/high/critical)
-- `-a, --assignee`: 负责人
-
-**示例：**
-```bash
-python -m task_manager.cli add "完成报告" -d "季度总结报告" -p high -a "张三"
-```
-
-#### list - 列出任务
+### 批量命令
 
 ```bash
-python -m task_manager.cli list [选项]
+# 批量完成
+python -m task_manager.cli batch complete [task_id...]
+
+# 批量取消
+python -m task_manager.cli batch cancel [task_id...]
 ```
 
-**选项：**
-- `-s, --status`: 按状态筛选 (todo/in_progress/done/cancelled)
-- `-a, --assignee`: 按负责人筛选
-
-**示例：**
-```bash
-python -m task_manager.cli list -s todo
-python -m task_manager.cli list -a "张三"
-```
-
-#### done - 标记完成
+### 导入导出命令
 
 ```bash
-python -m task_manager.cli done <task_id>
+# 导入任务
+python -m task_manager.cli import <file>
+
+# 导出任务
+python -m task_manager.cli export [-f format] [-o output]
 ```
 
-**示例：**
-```bash
-python -m task_manager.cli done a1b2c3d4
-```
-
-#### search - 搜索任务
-
-```bash
-python -m task_manager.cli search <关键词>
-```
-
-**示例：**
-```bash
-python -m task_manager.cli search "文档"
-```
-
-#### stats - 显示统计
+### 工具命令
 
 ```bash
-python -m task_manager.cli stats
+# 查找重复
+python -m task_manager.cli duplicates [--threshold 0.8]
+
+# 事件历史
+python -m task_manager.cli history [-n limit]
+
+# 插件状态
+python -m task_manager.cli plugins
 ```
 
-#### remove - 删除任务
+### 增强的现有命令
 
+#### add 命令新增参数
 ```bash
-python -m task_manager.cli remove <task_id>
+python -m task_manager.cli add "title" [-t tags] [...other options]
 ```
 
-**示例：**
-```bash
-python -m task_manager.cli remove a1b2c3d4
-```
+- `-t, --tags`: 逗号分隔的标签列表
 
 ## 使用示例
 
-### 基础任务操作
+### 事件系统使用
 
 ```python
-from task_manager.models import Task, Priority, TaskStatus
-from task_manager.json_store import JsonStore
+from task_manager.events import get_event_bus, Event, EventType
+from task_manager.models import Task
 
-# 创建存储实例
-store = JsonStore()
+# 获取事件总线
+bus = get_event_bus()
 
-# 创建任务
-task = Task(
-    title="实现用户认证",
-    description="添加用户登录和注册功能",
-    priority=Priority.HIGH
-)
+# 订阅事件
+def on_task_created(event: Event):
+    print(f"New task: {event.payload['title']}")
 
-# 添加子任务
-task.add_subtask("设计数据库表")
-task.add_subtask("实现登录API")
-task.add_subtask("编写前端页面")
+bus.subscribe(EventType.TASK_CREATED, on_task_created)
 
-# 保存任务
-task_id = store.add(task)
-
-# 查询任务
-retrieved = store.get(task_id)
-print(f"进度: {retrieved.progress:.0%}")
-
-# 完成子任务
-retrieved.subtasks[0].complete()
-store.update(retrieved)
-
-# 完成整个任务
-retrieved.mark_done()
-store.update(retrieved)
+# 创建任务（会自动触发事件）
+task = Task(title="测试任务")
+store.add(task)
 ```
 
-### 统计和报表
+### 模板系统使用
 
 ```python
-from task_manager.stats import summary, format_summary
+from task_manager.templates import TaskTemplate, TemplateRegistry
 
-# 生成统计
-stats = summary(store)
+# 创建自定义模板
+template = TaskTemplate(
+    name="code-review",
+    title_pattern="Review: {pr_title}",
+    description_pattern="Code review for PR #{pr_number}",
+    default_tags=["review"],
+    subtask_titles=["Read code", "Test changes", "Provide feedback"]
+)
 
-# 显示报表
-report = format_summary(stats)
-print(report)
+# 注册模板
+registry = TemplateRegistry("templates.json")
+registry.add(template)
+
+# 使用模板
+task = template.render({
+    "pr_title": "Fix login bug",
+    "pr_number": "123"
+})
+```
+
+### 批量操作使用
+
+```python
+from task_manager.batch import BatchOperations
+from task_manager.json_store import JsonStore
+
+store = JsonStore()
+batch = BatchOperations(store)
+
+# 导出已完成任务
+batch.export_to_json("completed.json", TaskStatus.DONE)
+
+# 批量完成所有高优先级任务
+high_priority = store.filter_by_priority(Priority.HIGH)
+task_ids = [t.task_id for t in high_priority if t.status == TaskStatus.TODO]
+batch.complete_all(task_ids)
+```
+
+### 插件开发示例
+
+```python
+from task_manager.plugins import BasePlugin, PluginMeta
+from task_manager.events import Event, EventType
+
+class SlackPlugin(BasePlugin):
+    @property
+    def meta(self) -> PluginMeta:
+        return PluginMeta(
+            name="slack",
+            version="1.0.0",
+            description="Send notifications to Slack"
+        )
+    
+    def activate(self):
+        self.webhook_url = self.config.get("webhook_url")
+        self.bus.subscribe(EventType.TASK_COMPLETED, self._notify_slack)
+    
+    def _notify_slack(self, event: Event):
+        # 发送Slack通知的实现
+        pass
 ```
 
 ## 相关文档
